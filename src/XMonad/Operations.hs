@@ -43,7 +43,7 @@ module XMonad.Operations (
     StateFile (..), writeStateToFile, readStateFile, restart,
 
     -- * Floating Layer
-    float, floatLocation,
+    float, floatLocation, whenDec,
 
     -- * Window Size Hints
     D, mkAdjust, applySizeHints, applySizeHints', applySizeHintsContents,
@@ -157,10 +157,16 @@ kill = withFocused killWindow
 -- | Modify the current window list with a pure function, and refresh
 windows :: (WindowSet -> WindowSet) -> X ()
 windows f = do
-    XState { windowset = old } <- get
+    old <- gets windowset
+    frf <- asks (focusRaisesFloat . config)
     let oldvisible = concatMap (W.integrate' . W.stack . W.workspace) $ W.current old : W.visible old
         newwindows = W.allWindows ws \\ W.allWindows old
-        ws = f old
+        oldFloats = M.keys $ M.difference (W.floating old) (W.floating ws)
+        mws = f old
+        ws = if frf && maybe False (\fw -> M.member fw (W.floating mws)) (W.peek mws)
+                then W.shiftMaster mws
+                else mws
+    mapM_ removeFloatDec oldFloats
     XConf { display = d , normalBorder = nbc, focusedBorder = fbc } <- ask
 
     mapM_ setInitialProperties newwindows
@@ -201,7 +207,9 @@ windows f = do
                     , Just r <- [M.lookup fw m]]
             vs = flt ++ rs
 
-        io $ restackWindows d (map fst vs)
+        mapM_ (showFloatDec . fst) flt
+        fl <- gets floatingLayer
+        io $ restackWindows d (concatMap (stackDec fl . fst) vs)
         -- return the visible windows for this workspace:
         return vs
 
@@ -277,6 +285,7 @@ setWindowBorderWithFallback dpy w color basic = io $
 -- | Hide a window by unmapping it and setting Iconified.
 hide :: Window -> X ()
 hide w = whenX (gets (S.member w . mapped)) $ withDisplay $ \d -> do
+    hideFloatDec w
     cMask <- asks $ clientMask . config
     io $ do selectInput d w (cMask .&. complement structureNotifyMask)
             unmapWindow d w
@@ -502,6 +511,7 @@ broadcastMessage a = withWindowSet $ \ws -> do
         v = map W.workspace . W.visible $ ws
         h = W.hidden ws
     mapM_ (sendMessageWithNoRefresh a) (c : v ++ h)
+    sendMessageToFloat a
 
 -- | Send a message to a layout, without refreshing.
 sendMessageWithNoRefresh :: Message a => a -> WindowSpace -> X ()
@@ -667,6 +677,7 @@ readStateFile xmc = do
                     , mapped          = S.empty
                     , waitingUnmap    = M.empty
                     , dragging        = Nothing
+                    , floatingLayer   = FLayer mempty mempty (floatHook xmc)
                     , extensibleState = extState
                     }
   where
@@ -788,33 +799,40 @@ mouseDragCursor cursorGlyph f done = do
 -- | Drag the window under the cursor with the mouse while it is dragged.
 mouseMoveWindow :: Window -> X ()
 mouseMoveWindow w = whenX (isClient w) $ withDisplay $ \d -> do
-    wa <- io $ getWindowAttributes d w
+    WindowAttributes{ wa_x = wax, wa_y = way, wa_width = waw, wa_height = wah
+                    , wa_border_width = wabw} <- io $ getWindowAttributes d w
     (_, _, _, ox', oy', _, _, _) <- io $ queryPointer d w
     let ox = fromIntegral ox'
         oy = fromIntegral oy'
+    startDraggingDec w
+    dragHandler <- whileDraggingDec w
     mouseDragCursor
               (Just xC_fleur)
-              (\ex ey -> do
-                  io $ moveWindow d w (fromIntegral (fromIntegral (wa_x wa) + (ex - ox)))
-                                      (fromIntegral (fromIntegral (wa_y wa) + (ey - oy)))
-                  float w
-              )
-              (float w)
+              (\ex ey ->
+                  let nx = fromIntegral wax + fromIntegral (ex - ox)
+                      ny = fromIntegral way + fromIntegral (ey - oy)
+                      r = Rectangle nx ny (fromIntegral (waw + 2 * wabw)) (fromIntegral wah)
+                   in io (moveWindow d w nx ny) >> dragHandler r)
+              (float w >> finishDraggingDec w)
 
 -- | Resize the window under the cursor with the mouse while it is dragged.
 mouseResizeWindow :: Window -> X ()
 mouseResizeWindow w = whenX (isClient w) $ withDisplay $ \d -> do
-    wa <- io $ getWindowAttributes d w
+    WindowAttributes{ wa_x = wax, wa_y = way, wa_width = waw, wa_height = wah
+                    , wa_border_width = wabw} <- io $ getWindowAttributes d w
     sh <- io $ getWMNormalHints d w
-    io $ warpPointer d none w 0 0 0 0 (fromIntegral (wa_width wa)) (fromIntegral (wa_height wa))
+    io $ warpPointer d none w 0 0 0 0 (fromIntegral waw) (fromIntegral wah)
+    startDraggingDec w
+    dragHandler <- whileDraggingDec w
     mouseDragCursor
               (Just xC_bottom_right_corner)
-              (\ex ey -> do
-                 io $ resizeWindow d w `uncurry`
-                    applySizeHintsContents sh (ex - fromIntegral (wa_x wa),
-                                               ey - fromIntegral (wa_y wa))
-                 float w)
-              (float w)
+              (\ex ey ->
+                 let (nw, nh) = applySizeHintsContents sh ( ex - fromIntegral wax
+                                                          , ey - fromIntegral way)
+                     r = Rectangle (fromIntegral wax) (fromIntegral way)
+                                   (nw + fromIntegral (2 * wabw)) nh
+                  in io (resizeWindow d w nw nh) >> dragHandler r)
+              (float w >> finishDraggingDec w)
 
 -- ---------------------------------------------------------------------
 -- Support for window size hints
@@ -873,3 +891,86 @@ applyResizeIncHint (iw,ih) x@(w,h) =
 applyMaxSizeHint  :: D -> D -> D
 applyMaxSizeHint (mw,mh) x@(w,h) =
     if mw > 0 && mh > 0 then (min w mw,min h mh) else x
+
+
+--------------------------------------------------------------
+-- Floating Layer Functions
+-------------------------------------------------------------
+
+-- | If the window is decorated, hide it's decoration
+hideFloatDec :: Window -> X ()
+hideFloatDec = withDec' $ \fd ow dw -> do
+    withDisplay $ \d -> io $ unmapWindow d dw
+    hideFDec fd ow dw
+
+-- | Send a message to the floating layer
+sendMessageToFloat :: Message a => a -> X ()
+sendMessageToFloat a = withFLayer $ \(FLayer _ _ fd) -> do
+    mfd <- handleFloatMessage fd (SomeMessage a)
+    modifyFLayer (newFDec mfd)
+
+-- | If a window is decorated, prepare it's decoration for dragging
+startDraggingDec :: Window -> X ()
+startDraggingDec = withDec' startDecDrag
+
+-- | If a window is decorated, alert the decortation that the dragging has ended
+finishDraggingDec :: Window -> X ()
+finishDraggingDec = withDec' finishDecDrag
+
+-- | If a window is decorated allow the decoration to respond to the new position
+whileDraggingDec :: Window -> X (Rectangle -> X ())
+whileDraggingDec ow = withFLayer $ \(FLayer fws _ fd) -> case M.lookup ow fws of
+    Just (Just dw) -> whileDecDrag fd ow dw
+    _              -> return $ \_ -> return ()
+
+-- | If a window is decorated, destroy the decoration
+removeFloatDec :: Window -> X ()
+removeFloatDec ow = do withDec ow (\fd dw -> do
+                            nfd <- removeFDec fd ow dw
+                            withDisplay $ \d -> io $ destroyWindow d dw
+                            modifyFLayer $ newFDec nfd)
+                       modifyFLayer $ deleteByOrig ow
+
+-- | Reorder the floating windows such that their decorations are paired with
+-- their parents
+stackDec :: Ord a => FLayer a -> a -> [a]
+stackDec (FLayer fws _ _) w = case M.lookup w fws of
+    Just (Just dw) -> [dw, w]
+    _              -> [w]
+
+-- | Show the decoration for the given floating window or create it if necessary
+showFloatDec :: Window -> X ()
+showFloatDec w = withFLayer $ \(FLayer fws _ fd) ->
+    case M.lookup w fws of
+        --Decration exists, and may need to be modified
+        Just (Just dw) -> do
+            reveal dw
+            nfd <- moveFDec fd w dw
+            modifyFLayer (newFDec nfd)
+        --The window was just added to the floating layer
+        --Create a the corresponding decoration
+        Nothing -> do
+            (mw, mfd) <- createFDec fd w
+            modifyFLayer (newFDec mfd . insertFDec w mw)
+        --The window should not be decorated
+        _ -> return ()
+
+-- | a convience wrapper that takes a applies the given function to a the
+-- floating window in it's context and adjusts the Floating Layer in accordance
+withDec' :: (FloatDec Window -> Window -> Window -> X (Maybe (FloatDec Window)))
+                                                              -> Window -> X ()
+withDec' wf ow = withFLayer $ \(FLayer fws _ fl) -> case M.lookup ow fws of
+    Just (Just dw) -> wf fl ow dw >>= \nfd -> modifyFLayer $ newFDec nfd
+    _              -> return ()
+
+-- | if the given window is decorated, apply the given function to it's decorated context
+withDec :: Window -> (FloatDec Window -> Window -> X ()) -> X ()
+withDec ow f = withFLayer $ \(FLayer fws _ fl) -> case M.lookup ow fws of
+    Just (Just dw) -> f fl dw
+    _              -> return ()
+
+-- | If the given window is a decoration, apply the given function to it's parent window
+whenDec :: Window -> (Window -> X ()) -> X ()
+whenDec dw f = withFLayer $ \(FLayer _ dws _) -> case M.lookup dw dws of
+    Just ow -> f ow
+    _       -> return ()

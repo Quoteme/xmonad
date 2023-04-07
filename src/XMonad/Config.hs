@@ -29,11 +29,11 @@ module XMonad.Config (defaultConfig, Default(..)) where
 import XMonad.Core as XMonad hiding
     (workspaces,manageHook,keys,logHook,startupHook,borderWidth,mouseBindings
     ,layoutHook,modMask,terminal,normalBorderColor,focusedBorderColor,focusFollowsMouse
-    ,handleEventHook,clickJustFocuses,rootMask,clientMask)
+    ,handleEventHook,clickJustFocuses,rootMask,clientMask,focusRaisesFloat,floatFocusFollowsMouse)
 import qualified XMonad.Core as XMonad
     (workspaces,manageHook,keys,logHook,startupHook,borderWidth,mouseBindings
     ,layoutHook,modMask,terminal,normalBorderColor,focusedBorderColor,focusFollowsMouse
-    ,handleEventHook,clickJustFocuses,rootMask,clientMask)
+    ,handleEventHook,clickJustFocuses,rootMask,clientMask,focusRaisesFloat,floatFocusFollowsMouse)
 
 import XMonad.Layout
 import XMonad.Operations
@@ -148,6 +148,10 @@ layout = tiled ||| Mirror tiled ||| Full
      -- Percent of screen to increment by when resizing panes
      delta   = 3/100
 
+-- |  the decorations applied o floating windows
+floatDecorator :: FloatDec Window
+floatDecorator = noFloatDec
+
 ------------------------------------------------------------------------
 -- Event Masks:
 
@@ -177,6 +181,13 @@ focusFollowsMouse = True
 clickJustFocuses :: Bool
 clickJustFocuses = True
 
+-- | Whether focus follows the mouse pointer for floating windows
+floatFocusFollowsMouse :: Bool
+floatFocusFollowsMouse = True
+
+-- | Whether clicking a floating window raises it
+focusRaisesFloat :: Bool
+focusRaisesFloat = True
 
 -- | The xmonad key bindings. Add, modify or remove key bindings here.
 --
@@ -261,6 +272,7 @@ instance (a ~ Choose Tall (Choose (Mirror Tall) Full)) => Default (XConfig a) wh
     { XMonad.borderWidth        = borderWidth
     , XMonad.workspaces         = workspaces
     , XMonad.layoutHook         = layout
+    , XMonad.floatHook          = floatDecorator
     , XMonad.terminal           = terminal
     , XMonad.normalBorderColor  = normalBorderColor
     , XMonad.focusedBorderColor = focusedBorderColor
@@ -271,8 +283,10 @@ instance (a ~ Choose Tall (Choose (Mirror Tall) Full)) => Default (XConfig a) wh
     , XMonad.mouseBindings      = mouseBindings
     , XMonad.manageHook         = manageHook
     , XMonad.handleEventHook    = handleEventHook
+    , XMonad.floatFocusFollowsMouse = floatFocusFollowsMouse
     , XMonad.focusFollowsMouse  = focusFollowsMouse
-    , XMonad.clickJustFocuses       = clickJustFocuses
+    , XMonad.clickJustFocuses   = clickJustFocuses
+    , XMonad.focusRaisesFloat   = focusRaisesFloat
     , XMonad.clientMask         = clientMask
     , XMonad.rootMask           = rootMask
     , XMonad.handleExtraArgs = \ xs theConf -> case xs of

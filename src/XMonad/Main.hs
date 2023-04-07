@@ -211,6 +211,7 @@ launch initxmc drs = do
             , mapped          = S.empty
             , waitingUnmap    = M.empty
             , dragging        = Nothing
+            , floatingLayer   = FLayer mempty mempty (floatHook xmc)
             , extensibleState = M.empty
             }
 
@@ -367,13 +368,16 @@ handle e@(ButtonEvent {ev_window = w,ev_event_type = t,ev_button = b })
 -- True in the user's config.
 handle e@(CrossingEvent {ev_window = w, ev_event_type = t})
     | t == enterNotify && ev_mode   e == notifyNormal
-    = whenX (asks $ focusFollowsMouse . config) $ do
-        dpy <- asks display
-        root <- asks theRoot
-        (_, _, w', _, _, _, _, _) <- io $ queryPointer dpy root
-        -- when Xlib cannot find a child that contains the pointer,
-        -- it returns None(0)
-        when (w' == 0 || w == w') (focus w)
+    = do ws <- gets windowset
+         dpy <- asks display
+         root <- asks theRoot
+         (_, _, w', _, _, _, _, _) <- io $ queryPointer dpy root
+         -- when Xlib cannot find a child that contains the pointer,
+         -- it returns None(0)
+         when (w' == 0 || w == w') $
+           if M.member w (W.floating ws)
+               then whenX (asks $ floatFocusFollowsMouse . config) (focus w)
+               else whenX (asks $ focusFollowsMouse      . config) (focus w)
 
 -- left a window, check if we need to focus root
 handle e@(CrossingEvent {ev_event_type = t})
