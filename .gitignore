@@ -30,3 +30,6 @@ tags
 
 # nix artifacts
 result
+
+# direnv artifacts
+.direnv
